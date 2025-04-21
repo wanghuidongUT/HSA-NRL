@@ -1,5 +1,6 @@
 ﻿# -*- coding:utf-8 -*-
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,39 +40,17 @@ batch_size = 96
 learning_rate = args.lr
 
 # load dataset
-
-if args.dataset == 'digestpath':
-    input_channel = 3
-    num_classes = 2
-
-    args.epoch_decay_start = 15
-    args.n_epoch = 30
-
-    train_dataset = MICCAI(root="/root/miccai",
-                        json_name="train.json",
-                        train=True,
-                        transform=transforms.Compose(
-                            [transforms.RandomHorizontalFlip(), transforms.Resize((256, 256)),
-                                transforms.ToTensor()]),
-                        noise_type=args.noise_type,
-                        noise_rate=args.noise_rate
-                        )
-
-
-
-
 if args.dataset == 'chaoyang':
-    input_channel = 3
-    num_classes = 4
+    input_channel = 1
+    num_classes = 3
     args.noise_rate = 0.15
     args.epoch_decay_start = 30
     args.n_epoch = 80
 
-    train_dataset = CHAOYANG(root="/root/chaoyang-data",
-                        json_name="train.json",
+    train_dataset = CHAOYANG(root="D:\WangHuidong\Platelet\Agonist Classification\Data",
                         train=True,
                         transform=transforms.Compose(
-                            [transforms.RandomHorizontalFlip(), transforms.Resize((256, 256)),
+                            [transforms.RandomHorizontalFlip(), transforms.Resize((64, 64)),
                                 transforms.ToTensor()])
                         )
                  
@@ -90,9 +69,6 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = alpha_plan[epoch]
         param_group['betas'] = (beta1_plan[epoch], 0.999)  # Only change beta1
-
-
-
 
 
 
@@ -182,7 +158,7 @@ def main():
 
     recorder = [[] for i in range(train_dataset.__len__())]
     # bulid model
-    cnn = models.resnet34(pretrained=False)
+    cnn = models.resnet18(pretrained=False)
     cnn.fc = nn.Linear(in_features=512, out_features=num_classes)
     cnn.cuda()
     optimizer = torch.optim.Adam(cnn.parameters(), lr=learning_rate)
@@ -223,7 +199,7 @@ def main():
                            label_list=label_li,
                            train=True,
                            transform=transforms.Compose(
-                               [transforms.RandomHorizontalFlip(), transforms.Resize((256, 256)),
+                               [transforms.RandomHorizontalFlip(), transforms.Resize((64, 64)),
                                 transforms.ToTensor()]),
                            noise_type=args.noise_type,
                            noise_rate=args.noise_rate,
@@ -317,7 +293,7 @@ def main():
                            label_list=dirty_label_li,
                            train=False,
                            transform=transforms.Compose(
-                               [transforms.Resize((256, 256)),
+                               [transforms.Resize((64, 64)),
                                 transforms.ToTensor()])
                            )
     dirty_loader = torch.utils.data.DataLoader(dataset=dirty_dataset,
@@ -344,7 +320,7 @@ def main():
                            label_list=np.array(train_dataset.train_noisy_labels)[e_h_index].tolist(),
                            train=False,
                            transform=transforms.Compose(
-                               [transforms.RandomHorizontalFlip(), transforms.Resize((256, 256)),
+                               [transforms.RandomHorizontalFlip(), transforms.Resize((64, 64)),
                                 transforms.ToTensor()])
                            )
     e_h_loader = torch.utils.data.DataLoader(dataset=e_h_dataset,
@@ -410,7 +386,6 @@ def main():
     train_dataset.train_labels = np.array(train_dataset.train_labels)[new_clean]
     with open("%s_%d_step1.p"%(args.dataset,int(args.noise_rate*100)), 'wb') as f:
         pickle.dump(train_dataset, f)
-
 
 
 if __name__ == '__main__':

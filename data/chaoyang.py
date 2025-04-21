@@ -8,23 +8,24 @@ import torch
 from .utils import noisify
 
 class CHAOYANG(data.Dataset):
-    def __init__(self, root, json_name=None, path_list=None, label_list=None, train=True, transform=None):
-        imgs = []
-        labels = []
-        if json_name:
-            json_path = os.path.join(root,json_name)
-            with open(json_path,'r') as f:
-                load_list = json.load(f)
-                for i in range(len(load_list)):
-                    img_path = os.path.join(root,load_list[i]["name"])
-                    imgs.append(img_path)
-                    labels.append(load_list[i]["label"])
-        if (path_list and label_list):
-            imgs = path_list
-            labels = label_list
+    def __init__(self, root, train=True, transform=None):
         self.transform = transform
-        self.train = train  # training set or test set
-        self.dataset='chaoyang'
+        self.train = train
+        self.dataset = 'chaoyang'
+        self.nb_classes = 4
+
+        # 加载 image.npy 和 label.npy
+        image_path = os.path.join(root, "PicDisease1.npy")
+        label_path = os.path.join(root, "LabelDisease1.npy")
+        imgs = np.load(image_path, allow_pickle=True)
+        labels = np.load(label_path, allow_pickle=True)
+
+        if self.train:
+            self.train_data, self.train_labels = imgs, labels
+            self.train_noisy_labels = [i for i in self.train_labels]
+            self.noise_or_not = [True for i in range(self.__len__())]
+        else:
+            self.test_data, self.test_labels = imgs, labels
     
         self.nb_classes=4
         if self.train:
