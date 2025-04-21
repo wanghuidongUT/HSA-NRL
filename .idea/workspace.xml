@@ -4,17 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="00c1e6f5-3960-4a79-9ed7-436eb52eae21" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/HSA-NRL.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/NSHE.py" beforeDir="false" afterPath="$PROJECT_DIR$/NSHE.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/loss.py" beforeDir="false" afterPath="$PROJECT_DIR$/loss.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/step1.py" beforeDir="false" afterPath="$PROJECT_DIR$/step1.py" afterDir="false" />
-    </list>
+    <list default="true" id="00c1e6f5-3960-4a79-9ed7-436eb52eae21" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -123,7 +113,7 @@
       <workItem from="1744956287213" duration="14437000" />
       <workItem from="1745020044191" duration="5129000" />
       <workItem from="1745037976189" duration="6048000" />
-      <workItem from="1745059633611" duration="3804000" />
+      <workItem from="1745059633611" duration="5000000" />
     </task>
     <servers />
   </component>
