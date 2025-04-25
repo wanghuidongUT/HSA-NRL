@@ -1,275 +1,158 @@
-﻿# -*- coding:utf-8 -*-
-import os
-import torch 
-import torch.nn as nn
+﻿import numpy as np
+import torch
 import torch.nn.functional as F
-from torch.autograd import Variable
-import torchvision.transforms as transforms
-from data.cifar import CIFAR10, CIFAR100
-from data.miccai import MICCAI
-import argparse, sys
-import numpy as np
-import torchvision.models as models
 import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import models
+from data.miccai import MICCAI
 import pickle
+import os
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-from loss import loss_weight,loss_noweight
+def evaluate(loader, model1, model2):
+    model1.eval()
+    # model2 will be updated dynamically by EMA
+    correct1, correct2, total = 0, 0, 0
+    all_labels = []
+    all_preds1 = []
+    all_preds2 = []
+    with torch.no_grad():
+        for images, labels, _ in loader:
+            images = images.cuda().float()
+            labels = labels.cuda()
+            outputs1 = model1(images)
+            outputs2 = model2(images)
+            _, pred1 = torch.max(outputs1, 1)
+            _, pred2 = torch.max(outputs2, 1)
+            correct1 += (pred1 == labels).sum().item()
+            correct2 += (pred2 == labels).sum().item()
+            total += labels.size(0)
+            all_labels.extend(labels.cpu().numpy())
+            all_preds1.extend(pred1.cpu().numpy())
+            all_preds2.extend(pred2.cpu().numpy())
 
+    # Confusion matrix
+    cm1 = confusion_matrix(all_labels, all_preds1)
+    cm2 = confusion_matrix(all_labels, all_preds2)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    sns.heatmap(cm1, annot=True, fmt='d', ax=axes[0], cmap='Blues')
+    axes[0].set_title('Model1 Confusion Matrix')
+    sns.heatmap(cm2, annot=True, fmt='d', ax=axes[1], cmap='Greens')
+    axes[1].set_title('Model2 Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig("record/confusion_matrix.png")
+    print("[✓] Confusion matrix saved to record/confusion_matrix.png")
+    plt.close()
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--lr', type = float, default = 1e-3)
-parser.add_argument('--forget_rate', type = float, help = 'forget rate', default = None)
-parser.add_argument('--dataset', type = str, default = 'chaoyang')
-parser.add_argument('--n_epoch', type=int, default=30)
-parser.add_argument('--seed', type=int, default=1)
-parser.add_argument('--print_freq', type=int, default=50)
-parser.add_argument('--num_workers', type=int, default=16, help='how many subprocesses to use for data loading')
-parser.add_argument('--num_iter_per_epoch', type=int, default=400)
-parser.add_argument('--epoch_decay_start', type=int, default=18)
-parser.add_argument('--gpu', type=int, default=0)
-parser.add_argument('--warm_up', type=int, default=10)
-parser.add_argument('--pickle_path', type=str, required=True)
+    return 100 * correct1 / total, 100 * correct2 / total
 
-args = parser.parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = "%d" % args.gpu
-# Seed
-torch.manual_seed(args.seed)
-torch.cuda.manual_seed(args.seed)
+def update_ema(model1, model2, m=0.999):
+    for param1, param2 in zip(model1.parameters(), model2.parameters()):
+        param2.data = m * param2.data + (1 - m) * param1.data
 
-# Hyper Parameters
+def train(loader, epoch, model1, optimizer, model2, recorder1, recorder2):
+    model1.train()
+    model2.eval()
+    total, correct1, correct2 = 0, 0, 0
+    for images, labels, indices in loader:
+        images = images.cuda().float()
+        labels = labels.cuda().long()
 
-learning_rate = args.lr 
-
-# load dataset
-
-
-if args.dataset=='digestpath':
-
-    input_channel=3
-    num_classes=2
-
-    args.epoch_decay_start = 15
-    args.n_epoch = 40
-    batch_size = 96
-
-    train_dataset = pickle.load(open(args.pickle_path,"rb"))
-
-    test_dataset = MICCAI(root="/root/miccai",
-                          json_name="test.json",
-                          train=False,
-                          transform=transforms.Compose([transforms.Resize((256, 256)), transforms.ToTensor()]),
-                          )
-
-if args.dataset=='chaoyang':
-
-    input_channel=3
-    num_classes=4
-    args.epoch_decay_start = 30
-    args.n_epoch = 80
-    batch_size = 96
-    train_dataset = pickle.load(open(args.pickle_path,"rb"))
-
-    test_dataset = MICCAI(root="/root/chaoyang-data",
-                          json_name="test.json",
-                          train=False,
-                          transform=transforms.Compose([transforms.Resize((256, 256)), transforms.ToTensor()]),
-                          )
-
-recorder1 = [[] for i in range(train_dataset.__len__())]
-recorder2 = [[] for i in range(train_dataset.__len__())]
-def record_history(index,output,target,recorder):
-    # pdb.set_trace()
-    pred = F.softmax(output, dim=1).cpu().data
-    # pred = output.cpu().data
-    # _, pred = torch.max(F.softmax(output, dim=1).data, 1)
-    for i,ind in enumerate(index):
-        recorder[ind].append(pred[i][target.cpu()[i]].numpy().tolist())
-        ##save forget event below
-        # recorder[ind].append((target.cpu()[i] == pred.cpu()[i]).numpy().tolist())
-    return
-
-
-# Adjust learning rate and betas for Adam Optimizer
-mom1 = 0.9
-mom2 = 0.1
-alpha_plan = [learning_rate] * args.n_epoch
-beta1_plan = [mom1] * args.n_epoch
-for i in range(args.epoch_decay_start, args.n_epoch):
-    alpha_plan[i] = float(args.n_epoch - i) / (args.n_epoch - args.epoch_decay_start) * learning_rate
-    beta1_plan[i] = mom2
-
-def adjust_learning_rate(optimizer, epoch):
-    for param_group in optimizer.param_groups:
-        param_group['lr']=alpha_plan[epoch]
-        param_group['betas']=(beta1_plan[epoch], 0.999) # Only change beta1
-        
-
-
-def accuracy(logit, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    output = F.softmax(logit, dim=1)
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-    res = []
-    for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
-        res.append(correct_k.mul_(100.0 / batch_size))
-    return res
-
-
-
-# Train the Model
-def train(train_loader,epoch, model1, optimizer1, model2, m):
-    print ('Training ...' )
-
-    train_total=0
-    train_correct=0 
-    train_total2=0
-    train_correct2=0 
-    if epoch != 1:
-        m_prob_1 = np.array([1-(recorder1[i][-1]) for i in range(len(recorder1))])
-        m_prob_2 = np.array([1-(recorder2[i][-1]) for i in range(len(recorder2))])
-        m_prob_1 = torch.from_numpy(m_prob_1).cuda().float()
-        m_prob_2 = torch.from_numpy(m_prob_2).cuda().float()
-        m_prob_1_sorted_index = torch.argsort(m_prob_1)
-        m_prob_2_sorted_index = torch.argsort(m_prob_2)
-        forget_threshold = int(args.forget_rate*len(recorder1))
-        if forget_threshold == 0:
-            drop_ind1 = torch.tensor([])
-            drop_ind2 = torch.tensor([])
-        else:
-            drop_ind1 = m_prob_1_sorted_index[-forget_threshold:]
-            drop_ind2 = m_prob_2_sorted_index[-forget_threshold:]
-    else:#  recorder is empty
-        drop_ind1 = torch.tensor([])
-        drop_ind2 = torch.tensor([])
-
-    for i, (images, labels, indexes) in enumerate(train_loader):
-        ind=indexes.cpu().numpy().transpose()
-        
-        images = Variable(images).cuda()
-        labels = Variable(labels).cuda()
-        # Forward + Backward + Optimize
-        logits1=model1(images)
-        record_history(indexes,logits1,labels,recorder1)
-        prec1, _ = accuracy(logits1, labels, topk=(1, 1))
-        train_total+=1
-        train_correct+=prec1
-        with torch.no_grad():
-            logits2 = model2(images)
-        record_history(indexes,logits2,labels,recorder2)
-        prec2, _ = accuracy(logits2, labels, topk=(1, 1))
-        train_total2+=1
-        train_correct2+=prec2
-        if epoch < args.warm_up:# warm up
-            loss_1, loss_2 = loss_noweight(logits1, logits2, labels, ind, drop_ind1, drop_ind2)
-        else:
-            loss_1, loss_2 = loss_weight(logits1, logits2, labels, ind, recorder1, recorder2, drop_ind1, drop_ind2)
-
-
-        optimizer1.zero_grad()
-        loss_1.backward()
-        optimizer1.step()
-        with torch.no_grad():
-            for param_1, param_2 in zip(model1.parameters(), model2.parameters()):
-                param_2.data = param_2.data * m + param_1.data * (1. - m)
-
-        if (i+1) % args.print_freq == 0:
-            print ('Epoch [%d/%d], Iter [%d/%d] Training Accuracy1: %.4F, Training Accuracy2: %.4f, Loss1: %.4f, Loss2: %.4f' 
-                  %(epoch+1, args.n_epoch, i+1, len(train_dataset)//batch_size, prec1, prec2, loss_1.data, loss_2.data, ))
-
-    train_acc1=float(train_correct)/float(train_total)
-    train_acc2=float(train_correct2)/float(train_total2)
-    return train_acc1, train_acc2
-
-# Evaluate the Model
-def evaluate(test_loader, model1, model2):
-    print ('Evaluating ...')
-    model1.eval()    # Change model to 'eval' mode.
-    correct1 = 0
-    total1 = 0
-    for images, labels, _ in test_loader:
-        images = Variable(images).cuda()
         logits1 = model1(images)
-        outputs1 = F.softmax(logits1, dim=1)
-        _, pred1 = torch.max(outputs1.data, 1)
-        total1 += labels.size(0)
-        correct1 += (pred1.cpu() == labels).sum()
-
-    model2.eval()    # Change model to 'eval' mode 
-    correct2 = 0
-    total2 = 0
-    for images, labels, _ in test_loader:
-        images = Variable(images).cuda()
         logits2 = model2(images)
-        outputs2 = F.softmax(logits2, dim=1)
-        _, pred2 = torch.max(outputs2.data, 1)
-        total2 += labels.size(0)
-        correct2 += (pred2.cpu() == labels).sum()
- 
-    acc1 = 100*float(correct1)/float(total1)
-    acc2 = 100*float(correct2)/float(total2)
+
+        prob1 = F.softmax(logits1, dim=1)
+        prob2 = F.softmax(logits2, dim=1)
+
+        for i in range(len(indices)):
+            idx = indices[i].item() if isinstance(indices[i], torch.Tensor) else indices[i]
+            if idx < len(recorder1):
+                recorder1[idx].append(prob1[i][labels[i]].item())
+            if idx < len(recorder2):
+                recorder2[idx].append(prob2[i][labels[i]].item())
+
+        loss = F.cross_entropy(logits1, labels)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        _, pred1 = torch.max(logits1, 1)
+        _, pred2 = torch.max(logits2, 1)
+        total += labels.size(0)
+        correct1 += (pred1 == labels).sum().item()
+        correct2 += (pred2 == labels).sum().item()
+
+    acc1 = 100.0 * correct1 / total
+    acc2 = 100.0 * correct2 / total
+    print(f"Epoch [{epoch+1}] Acc1: {acc1:.2f}%  Acc2: {acc2:.2f}%")
     return acc1, acc2
 
+def make_model():
+    model = models.resnet18(weights=None)
+    model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    model.fc = nn.Linear(512, 3)
+    return model.cuda()
 
 def main():
-    # Data Loader (Input Pipeline)
-    print ('loading dataset...')
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                               batch_size=batch_size, 
-                                               num_workers=args.num_workers,
-                                               drop_last=False,
-                                               shuffle=True)
-    
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                              batch_size=batch_size, 
-                                              num_workers=args.num_workers,
-                                              drop_last=False,
-                                              shuffle=False)
-    # Define models
-    print ('building model...')
-    cnn1 = models.resnet34(pretrained=False)
-    cnn1.fc = nn.Linear(in_features=512, out_features=num_classes)
+    os.makedirs("record", exist_ok=True)
+    os.makedirs("model", exist_ok=True)
 
-    cnn1.cuda()
-    #print (cnn1.parameters)
-    optimizer1 = torch.optim.Adam(cnn1.parameters(), lr=learning_rate)
+    imgs = np.load("record/clean_image_path.npy", allow_pickle=True)
+    labels = np.load("record/clean_label.npy")
 
-    cnn2 = models.resnet34(pretrained=False)
-    cnn2.fc = nn.Linear(in_features=512, out_features=num_classes)
-    cnn2.cuda()
-    with torch.no_grad():
-        for param_1, param_2 in zip(cnn1.parameters(), cnn2.parameters()):
-            param_2.data.copy_(param_1.data)  # initialize
-            param_2.requires_grad = False  # not update by gradient
-    #print (cnn2.parameters)
-    epoch=0
-    best_acc = 0
-    # training
-    for epoch in range(1, args.n_epoch):
-        # train models
+    dataset = MICCAI(imgs, labels, clean_index=np.arange(len(imgs)), split='easy', noise_type='clean')
+    train_loader = DataLoader(dataset, batch_size=64, shuffle=True, num_workers=0)
 
-        cnn1.train()
-        adjust_learning_rate(optimizer1, epoch)
-        cnn2.train()
-        train_acc1, train_acc2=train(train_loader, epoch, cnn1, optimizer1, cnn2, m=0.999)
+    recorder1 = [[] for _ in range(len(imgs))]
+    recorder2 = [[] for _ in range(len(imgs))]
 
-        test_acc1, test_acc2=evaluate(test_loader, cnn1, cnn2)
-        if test_acc1 > best_acc:
-            best_acc = test_acc1
-            torch.save(cnn1.state_dict(),"model/best_ckpt.pth")
-        if test_acc2 > best_acc:
-            best_acc = test_acc2
-            torch.save(cnn2.state_dict(),"model/best_ckpt.pth")
-        print('Epoch [%d/%d] test Accuracy on the %s test images: Model1 %.4f %% Model2 %.4f %%' % (epoch+1, args.n_epoch, len(test_dataset), test_acc1, test_acc2))
-    print(best_acc)
-    print(args)
-    
-if __name__=='__main__':
+    model1 = make_model()
+    model2 = make_model()
+    import copy
+    model2 = copy.deepcopy(model1)
+    # model2.load_state_dict(torch.load("model/correction_model.pth"))
+    # model2.eval()
+
+    optimizer = torch.optim.SGD(model1.parameters(), lr=0.001, momentum=0.9, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=3, factor=0.5, verbose=True)
+
+    for epoch in range(20):
+        # train(train_loader, epoch, model1, optimizer, model2, recorder1, recorder2)
+        acc1, acc2 = train(train_loader, epoch, model1, optimizer, model2, recorder1, recorder2)
+        update_ema(model1, model2, m=0.999)
+        scheduler.step(acc2)
+        print("ACC1: {:.2f}%, ACC2: {:.2f}%".format(acc1, acc2), "Learning rate:", optimizer.param_groups[0]['lr'])
+
+    test_imgs = np.load("D:/WangHuidong/github/HSA-NRL/chaoyang/PicDiseaseTest0.npy")
+    test_labels = np.load("D:/WangHuidong/github/HSA-NRL/chaoyang/LabelDiseaseTest0.npy").squeeze()
+
+    # align test label mapping
+    unique_train = np.unique(labels)
+    unique_test = np.unique(test_labels)
+
+    if not np.array_equal(unique_train, unique_test):
+        print("[Warning] Label mismatch between train and test, remapping test labels.")
+        label_map = {v: i for i, v in enumerate(unique_train)}
+        test_labels = np.array([label_map[x] for x in test_labels])
+
+    test_dataset = MICCAI(test_imgs, test_labels, clean_index=np.arange(len(test_imgs)), split='easy', noise_type='clean')
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0)
+
+    acc1, acc2 = evaluate(test_loader, model1, model2)
+    fused_acc = (acc1 + acc2) / 2
+    print(f"\n[✓] Final Test Accuracy Summary:\n  Model1: {acc1:.2f}%\n  Model2: {acc2:.2f}%\n  Fused : {fused_acc:.2f}%")
+
+    with open("record/recorder1.pkl", "wb") as f:
+        pickle.dump(recorder1, f)
+    with open("record/recorder2.pkl", "wb") as f:
+        pickle.dump(recorder2, f)
+
+    torch.save(model1.state_dict(), "model/nshe_model1.pth")
+    torch.save(model2.state_dict(), "model/nshe_model2.pth")
+
+if __name__ == '__main__':
     main()

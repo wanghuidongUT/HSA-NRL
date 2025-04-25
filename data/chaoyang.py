@@ -1,56 +1,43 @@
-import torch.utils.data as data
-from PIL import Image
-import os
-import json
-import pickle
 import numpy as np
 import torch
-from .utils import noisify
+from torch.utils.data import Dataset
+from sklearn.model_selection import train_test_split
 
-class CHAOYANG(data.Dataset):
-    def __init__(self, root, train=True, transform=None):
+class CHAOYANG(Dataset):
+    def __init__(self, image_path, label_path, train=True, transform=None, split_ratio=0.9, random_seed=42):
         self.transform = transform
         self.train = train
-        self.dataset = 'chaoyang'
-        self.nb_classes = 4
 
-        # 加载 image.npy 和 label.npy
-        image_path = os.path.join(root, "PicDisease1.npy")
-        label_path = os.path.join(root, "LabelDisease1.npy")
-        imgs = np.load(image_path, allow_pickle=True)
-        labels = np.load(label_path, allow_pickle=True)
+        # 加载数据
+        images = np.load(image_path)           # shape: (N, 67, 67)
+        labels = np.load(label_path)           # shape: (N, 1)
+        labels = labels.squeeze()              # shape: (N,)
 
-        if self.train:
-            self.train_data, self.train_labels = imgs, labels
-            self.train_noisy_labels = [i for i in self.train_labels]
-            self.noise_or_not = [True for i in range(self.__len__())]
+        # 按索引划分 train/val
+        indices = np.arange(len(images))
+        train_idx, val_idx = train_test_split(indices, train_size=split_ratio, random_state=random_seed, shuffle=True, stratify=labels)
+
+        if train:
+            self.images = images[train_idx]
+            self.labels = labels[train_idx]
+            self.indices = train_idx
         else:
-            self.test_data, self.test_labels = imgs, labels
-    
-        self.nb_classes=4
-        if self.train:
-            self.train_data, self.train_labels = imgs,labels
-            self.train_noisy_labels=[i for i in self.train_labels]
-            self.noise_or_not = [True for i in range(self.__len__())]
-        else:
-            self.test_data, self.test_labels = imgs,labels
-
-    def __getitem__(self, index):
-        if self.train:
-            img, target = self.train_data[index], self.train_noisy_labels[index]
-        else:
-            img, target = self.test_data[index], self.test_labels[index]
-    
-        img = Image.open(img)
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-
-        return img, target, index
+            self.images = images[val_idx]
+            self.labels = labels[val_idx]
+            self.indices = val_idx
 
     def __len__(self):
-        if self.train:
-            return len(self.train_data)
-        else:
-            return len(self.test_data)
+        return len(self.images)
+
+    def __getitem__(self, index):
+        img = self.images[index]                 # shape: (67, 67)
+        label = self.labels[index]               # scalar
+        idx = self.indices[index]                # global index
+
+        img = torch.tensor(img, dtype=torch.float32).unsqueeze(0)  # shape: (1, 67, 67)
+        label = torch.tensor(label, dtype=torch.long)
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label, idx

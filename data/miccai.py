@@ -1,75 +1,64 @@
-import torch.utils.data as data
-from PIL import Image
-import os
-import json
-import pickle
 import numpy as np
 import torch
-from .utils import noisify
+from torch.utils.data import Dataset
+from data.utils import noisify
 
-class MICCAI(data.Dataset):
-    def __init__(self, root="", json_name=None, path_list=None, label_list=None, train=True, transform=None, target_transform=None, download=False,
-                 noise_type=None, noise_rate=0.2, random_state=0, nb_classes = 2):
-        imgs = []
-        labels = []
-        if json_name:
-            json_path = os.path.join(root,json_name)
-            with open(json_path,'r') as f:
-                load_list = json.load(f)
-                for i in range(len(load_list)):
-                    img_path = os.path.join(root,load_list[i]["name"])
-                    imgs.append(img_path)
-                    labels.append(load_list[i]["label"])
-        if (path_list and label_list):
-            imgs = path_list
-            labels = label_list
+class MICCAI(Dataset):
+    def __init__(self, image_array, label_array, clean_index=None, split='easy', transform=None,
+                 noise_type='symmetric', noise_rate=0.2, random_state=42, nb_classes=3):
+        """
+        image_array: numpy array of shape (N, 67, 67)
+        label_array: numpy array of shape (N,) or (N, 1)
+        clean_index: indices of clean/easy samples (used for 'easy' split)
+        split: 'easy' or 'hard'
+        """
         self.transform = transform
-        self.target_transform = target_transform
-        self.train = train  # training set or test set
-        self.dataset='miccai'
-        self.noise_type=noise_type
-        self.nb_classes=nb_classes
-        if self.train:
-            self.train_data, self.train_labels = imgs,labels
-            if noise_type != 'clean':
-                self.train_labels=np.asarray([[self.train_labels[i]] for i in range(len(self.train_labels))])
-                self.train_noisy_labels, self.actual_noise_rate = noisify(dataset=self.dataset, train_labels=self.train_labels, noise_type=noise_type, noise_rate=noise_rate, random_state=random_state,nb_classes=self.nb_classes)
-                self.train_noisy_labels=[i[0] for i in self.train_noisy_labels]
-                _train_labels=[i[0] for i in self.train_labels]
-                self.noise_or_not = np.transpose(self.train_noisy_labels)==np.transpose(_train_labels)
+        self.split = split
+
+        self.images = image_array
+        self.labels = label_array.squeeze()
+        self.nb_classes = nb_classes
+
+        if split == 'easy':
+            self.indices = np.array(clean_index)
+        elif split == 'hard':
+            all_indices = np.arange(len(self.images))
+            easy_mask = np.zeros(len(self.images), dtype=bool)
+            easy_mask[clean_index] = True
+            self.indices = all_indices[~easy_mask]  # not in clean_index
         else:
-            self.test_data, self.test_labels = imgs,labels
+            raise ValueError("split must be either 'easy' or 'hard'")
 
-    def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
+        # extract corresponding data
+        self.dataset = self.images[self.indices]
+        self.train_labels = self.labels[self.indices]
 
-        Returns:
-            tuple: (image, target) where target is index of the target class.
-        """
-        if self.train:
-            #if self.noise_type is not None:
-            if self.noise_type != 'clean':
-                img, target = self.train_data[index], self.train_noisy_labels[index]
-            else:
-                img, target = self.train_data[index], self.train_labels[index][0]
+        # apply noise
+        if noise_type == 'clean':
+            self.train_noisy_labels = self.train_labels.copy()
+            self.actual_noise_rate = 0.0
         else:
-            img, target = self.test_data[index], self.test_labels[index]
-        # doing this so that it is consistent with all other datasets
-        # to return a PIL Image
-        img = Image.open(img)
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return img, target, index
+            self.train_noisy_labels, self.actual_noise_rate = noisify(
+                dataset=self.dataset,
+                train_labels=self.train_labels,
+                noise_type=noise_type,
+                noise_rate=noise_rate,
+                random_state=random_state,
+                nb_classes=self.nb_classes
+            )
 
     def __len__(self):
-        if self.train:
-            return len(self.train_data)
-        else:
-            return len(self.test_data)
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        img = self.dataset[index]  # (67, 67)
+        label = self.train_noisy_labels[index]
+        global_index = self.indices[index]  # from original dataset
+
+        img = torch.tensor(img, dtype=torch.float32).unsqueeze(0)  # (1, 67, 67)
+        label = torch.tensor(label, dtype=torch.long)
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label, global_index
